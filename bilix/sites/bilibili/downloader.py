@@ -249,6 +249,7 @@ class DownloaderBilibili(BaseDownloaderPart):
         """
         ps = 30
         up_name, total_size, bv_ids = await api.get_up_video_info(self.client, url_or_mid, 1, ps, order, keyword)
+        self.logger.info(f'up主[{up_name}]，总视频数[{total_size}],bv_ids[{bv_ids}]')
         if self.hierarchy:
             path /= legal_title(f"【up】{up_name}")
             path.mkdir(parents=True, exist_ok=True)
@@ -311,7 +312,7 @@ class DownloaderBilibili(BaseDownloaderPart):
             cors = cors_slice(cors, p_range)
         await asyncio.gather(*cors)
 
-    async def get_video(self, url: str, path=Path('.'),
+    async def get_video(self, url: str, path=Path('.'), ignore: str = '',
                         quality: Union[str, int] = 0, image=False, subtitle=False, dm=False, only_audio=False,
                         codec: str = '', time_range: Tuple[int, int] = None, video_info: api.VideoInfo = None):
         """
@@ -325,6 +326,7 @@ class DownloaderBilibili(BaseDownloaderPart):
         :param dm: 是否下载弹幕
         :param only_audio: 是否仅下载音频
         :param codec: 视频编码（可通过codec获取）
+        :param ignore: 需要忽略的视频名关键字
         :param time_range: 切片的时间范围
         :param video_info: 额外数据，提供时不用再次请求页面
         :return:
@@ -333,6 +335,8 @@ class DownloaderBilibili(BaseDownloaderPart):
             if not video_info:
                 try:
                     video_info = await api.get_video_info(self.client, url)
+                    self.logger.info(f'[green]url is[green]:{url},[green]pubdate is[green]:{video_info.pubdate}')
+                    # self.logger.info(f'[green]video_info is[green]:{video_info}')
                 except (APIResourceError, APIUnsupportedError) as e:
                     return self.logger.warning(e)
             p_name = legal_title(video_info.pages[video_info.p].p_name)
@@ -341,53 +345,68 @@ class DownloaderBilibili(BaseDownloaderPart):
             base_name = p_name if len(video_info.title) > self.title_overflow and self.hierarchy and p_name else \
                 task_name
             media_name = base_name if not time_range else legal_title(base_name, *map(t2s, time_range))
+            if ignore:
+                ignore_list = [i.strip() for i in ignore.split(',')]
+                self.logger.info(f"ignore key words: {ignore_list}")
+                if any(i in media_name for i in ignore_list):
+                    self.logger.warning(f"ignore {media_name}")
+                    return
+            bvid = url.rsplit('/', 1)[-1].split('?', 1)[0]
+            if video_info.pubdate:
+                media_name = f"{video_info.pubdate}-{media_name}"
+            if bvid:
+                media_name = f"{media_name}-{bvid}"
             media_cors = []
             task_id = await self.progress.add_task(total=None, description=task_name)
             if video_info.dash:
                 try:  # choose video quality
                     video, audio = video_info.dash.choose_quality(quality, codec)
                 except KeyError:
-                    self.logger.warning(
-                        f"{task_name} 清晰度<{quality}> 编码<{codec}>不可用，请检查输入是否正确或是否需要大会员")
+                    self.logger.error(
+                        f"{task_name} 清晰度<{quality}> 编码<{codec}>不可用，请检查输入是否正确或是否需要大会员,url:{url}")
+                    self.logger.warning(f"{task_name} 改用默认编码")
+                    video, audio = video_info.dash.choose_quality(quality, '')
+                # else:
+                tmp: List[Tuple[api.Media, Path]] = []
+                self.logger.debug(f'[green]Dest file is[green]:{path.name}/{media_name}.mp4')
+                # 1. only video
+                if not audio and not only_audio:
+                    tmp.append((video, path / f'{media_name}.mp4'))
+                # 2. video and audio
+                elif audio and not only_audio:
+                    exists, media_path = path_check(path / f'{media_name}.mp4')
+                    if exists:
+                        self.logger.info(f'[green]{bvid} 已存在[/green] {media_path.name}')
+                    else:
+                        self.logger.info(f'[green]开始下载:{bvid}[/green] {media_name}.mp4')
+                        tmp.append((video, path / f'{media_name}-v'))
+                        tmp.append((audio, path / f'{media_name}-a'))
+                        # task need to be merged
+                        await self.progress.update(task_id=task_id, upper=ffmpeg.combine)
+                # 3. only audio
+                elif audio and only_audio:
+                    tmp.append((audio, path / f'{media_name}{audio.suffix}'))
                 else:
-                    tmp: List[Tuple[api.Media, Path]] = []
-                    # 1. only video
-                    if not audio and not only_audio:
-                        tmp.append((video, path / f'{media_name}.mp4'))
-                    # 2. video and audio
-                    elif audio and not only_audio:
-                        exists, media_path = path_check(path / f'{media_name}.mp4')
-                        if exists:
-                            self.logger.info(f'[green]已存在[/green] {media_path.name}')
-                        else:
-                            tmp.append((video, path / f'{media_name}-v'))
-                            tmp.append((audio, path / f'{media_name}-a'))
-                            # task need to be merged
-                            await self.progress.update(task_id=task_id, upper=ffmpeg.combine)
-                    # 3. only audio
-                    elif audio and only_audio:
-                        tmp.append((audio, path / f'{media_name}{audio.suffix}'))
-                    else:
-                        self.logger.warning(f"No audio for {task_name}")
-                    # convert to coroutines
-                    if not time_range:
-                        media_cors.extend(self.get_file(t[0].urls, path=t[1], task_id=task_id) for t in tmp)
-                    else:
-                        if len(tmp) > 0:
-                            fut = asyncio.Future()  # to fix key frame
-                            v = tmp[0]
-                            media_cors.append(self.get_media_clip(v[0].urls, v[1], time_range,
-                                                                  init_range=v[0].segment_base['initialization'],
-                                                                  seg_range=v[0].segment_base['index_range'],
-                                                                  set_s=fut,
-                                                                  task_id=task_id))
-                        if len(tmp) > 1:  # with audio
-                            a = tmp[1]
-                            media_cors.append(self.get_media_clip(a[0].urls, a[1], time_range,
-                                                                  init_range=a[0].segment_base['initialization'],
-                                                                  seg_range=a[0].segment_base['index_range'],
-                                                                  get_s=fut,
-                                                                  task_id=task_id))
+                    self.logger.warning(f"No audio for {task_name}")
+                # convert to coroutines
+                if not time_range:
+                    media_cors.extend(self.get_file(t[0].urls, path=t[1], task_id=task_id) for t in tmp)
+                else:
+                    if len(tmp) > 0:
+                        fut = asyncio.Future()  # to fix key frame
+                        v = tmp[0]
+                        media_cors.append(self.get_media_clip(v[0].urls, v[1], time_range,
+                                                              init_range=v[0].segment_base['initialization'],
+                                                              seg_range=v[0].segment_base['index_range'],
+                                                              set_s=fut,
+                                                              task_id=task_id))
+                    if len(tmp) > 1:  # with audio
+                        a = tmp[1]
+                        media_cors.append(self.get_media_clip(a[0].urls, a[1], time_range,
+                                                              init_range=a[0].segment_base['initialization'],
+                                                              seg_range=a[0].segment_base['index_range'],
+                                                              get_s=fut,
+                                                              task_id=task_id))
 
             elif video_info.other:
                 self.logger.warning(

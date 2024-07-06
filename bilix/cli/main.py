@@ -165,6 +165,10 @@ def print_help():
         "-tr --time-range", '[dark_cyan]str',
         r'下载视频的时间范围，格式如 h:m:s-h:m:s 或 s-s，默认无，仅get_video时生效',
     )
+    table.add_row(
+        "--ignore", '',
+        '需要忽略的视频名关键字，逗号分隔'
+    )
     table.add_row("-h --help", '', "帮助信息")
     table.add_row("-v --version", '', "版本信息")
     table.add_row("--debug", '', "显示debug信息")
@@ -336,6 +340,11 @@ class BasedTimeRange(click.ParamType):
     'time_range',
     type=BasedTimeRange(),
     default=None,
+)
+@click.option(
+    '--ignore',
+    'ignore',
+    type=str,
 )
 @click.option(
     '-h',

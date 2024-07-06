@@ -52,6 +52,7 @@ class InformerBilibili(DownloaderBilibili):
             f"[bold reverse] {video_info.title}-{video_info.pages[video_info.p].p_name} [/]"
             f" {video_info.status.view:,}👀 {video_info.status.like:,}👍 {video_info.status.coin:,}🪙",
             guide_style="bold cyan")
+        video_tree = tree.add(f"[bold]发布时间：{video_info.pubdate}")
         video_tree = tree.add("[bold]画面 Video")
         audio_tree = tree.add("[bold]声音 Audio")
         leaf_fmt = "codec: {codec:32} size: {size}"

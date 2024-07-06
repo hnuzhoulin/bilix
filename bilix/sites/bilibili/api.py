@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import os
 from urllib.parse import quote
 import httpx
 from pydantic import field_validator, BaseModel, Field
@@ -13,6 +14,7 @@ from bilix.utils import legal_title
 from bilix.exception import APIInvalidError, APIError, APIResourceError, APIUnsupportedError
 import hashlib
 import time
+from datetime import datetime
 
 dft_client_settings = {
     'headers': {'user-agent': 'PostmanRuntime/7.29.0', 'referer': 'https://www.bilibili.com'},
@@ -338,6 +340,7 @@ class VideoInfo(BaseModel):
     p: int
     pages: List[Page]  # [[p_name, p_url], ...]
     img_url: str
+    pubdate: Optional[str] = None
     status: Status
     bvid: Optional[str] = None
     dash: Optional[Dash] = None
@@ -349,12 +352,19 @@ class VideoInfo(BaseModel):
 def _parse_bv_html(url, html: str) -> VideoInfo:
     init_info = re.search(r'<script>window.__INITIAL_STATE__=({.*});\(', html).groups()[0]  # this line may raise
     init_info = json.loads(init_info)
+    # print('[green]_parse_bv_html is[green]:%s' % json.dumps(init_info['videoData'], ensure_ascii=False, indent=4))
+    with open(f"{url.rsplit('/', 1)[-1].split('?', 1)[0]}.json", 'w', encoding='utf-8') as bili_json:
+        json.dump(init_info, bili_json, ensure_ascii=False, indent=4)
     if len(init_info.get('error', {})) > 0:
         raise APIResourceError("视频已失效", url)  # 啊叻？视频不见了？在分区下载的时候可能产生
     # extract meta
     pages = []
     h1_title = legal_title(re.search('<h1[^>]*title="([^"]*)"', html).groups()[0])
     status = Status(**init_info['videoData']['stat'])
+    if 'pubdate' not in init_info['videoData']:
+        pubdate = None
+    else:
+        pubdate = datetime.strftime(datetime.fromtimestamp(init_info['videoData']['pubdate']), '%Y%m%d%H%M%S')
     bvid = init_info['bvid']
     desc = init_info['videoData'].get('desc', '')
     tags = [i['tag_name'] for i in init_info['tags']]
@@ -386,7 +396,7 @@ def _parse_bv_html(url, html: str) -> VideoInfo:
     if not img_url.startswith('http'):  # https://github.com/HFrost0/bilix/issues/52 just for some video
         img_url = 'http:' + img_url.split('@')[0]
     # construct data
-    video_info = VideoInfo(title=title, aid=aid, cid=cid, status=status,
+    video_info = VideoInfo(title=title, aid=aid, cid=cid, status=status, pubdate=pubdate,
                            p=p, pages=pages, img_url=img_url, bvid=bvid, dash=dash, other=other,
                            desc=desc, tags=tags)
     return video_info
@@ -395,32 +405,41 @@ def _parse_bv_html(url, html: str) -> VideoInfo:
 def _parse_ep_html(url, html: str) -> VideoInfo:
     data = re.search(r'<script id="__NEXT_DATA__" type="application/json">({.*})</script>', html).groups()[0]
     data = json.loads(data)
+    # print('[green]_parse_bv_html is[green]:%s' % json.dumps(data, ensure_ascii=False,))
+    print(f"parse_ep_html:{url}")
+    with open(f"{url.rsplit('/', 1)[-1].split('?', 1)[0]}.json", 'w', encoding='utf-8') as bili_html:
+        json.dump(data, bili_html, ensure_ascii=False, indent=4)
     queries = data['props']['pageProps']['dehydratedState']['queries']
-    season_info = queries[0]['state']['data']['seasonInfo']
-    media_info = season_info['mediaInfo']
-    stat = media_info['stat']
-    status = Status(coin=stat['coins'], view=stat['views'], danmaku=stat['danmakus'], share=stat['share'],
-                    like=stat['likes'], reply=stat['reply'], favorite=stat['favorite'], follow=stat['favorites'])
-    title = legal_title(media_info['title'])
-    desc = media_info['evaluate']
-    episodes = media_info['episodes']
-    path: str = url.split('?')[0].split('/')[-1]
-    ep_id = path[2:] if path.startswith('ep') else str(episodes[0]["ep_id"])
-    p = 0
-    aid, cid, bvid = 0, 0, ""
-    pages = []
-    img_url = ''
-    for i, ep in enumerate(episodes):
-        if str(ep["ep_id"]) == ep_id:
-            p = i
-            aid, cid, bvid = ep["aid"], ep["cid"], ep["bvid"]
-            img_url = ep["cover"]
-        pages.append(Page(p_name=legal_title(ep["playerEpTitle"]), p_url=ep["link"]))
-    video_info = VideoInfo(
-        title=title, status=status, desc=desc,
-        aid=aid, cid=cid, bvid=bvid, p=p, pages=pages,
-        img_url=img_url, ep_id=ep_id,
-    )
+    try:
+        season_info = queries[0]['state']['data']['seasonInfo']
+        media_info = season_info['mediaInfo']
+        stat = media_info['stat']
+        status = Status(coin=stat['coins'], view=stat['views'], danmaku=stat['danmakus'], share=stat['share'],
+                        like=stat['likes'], reply=stat['reply'], favorite=stat['favorite'], follow=stat['favorites'])
+        title = legal_title(media_info['title'])
+        desc = media_info['evaluate']
+        episodes = media_info['episodes']
+        path: str = url.split('?')[0].split('/')[-1]
+        ep_id = path[2:] if path.startswith('ep') else str(episodes[0]["ep_id"])
+        p = 0
+        aid, cid, bvid = 0, 0, ""
+        pages = []
+        img_url = ''
+        pub_time = datetime.strptime(media_info['publish']['pub_time'], '%Y-%m-%d %H:%M:%S')
+        pubdate = pub_time.strftime('%Y%m%d%H%M%S')
+        for i, ep in enumerate(episodes):
+            if str(ep["ep_id"]) == ep_id:
+                p = i
+                aid, cid, bvid = ep["aid"], ep["cid"], ep["bvid"]
+                img_url = ep["cover"]
+            pages.append(Page(p_name=legal_title(ep["playerEpTitle"]), p_url=ep["link"]))
+        video_info = VideoInfo(
+            title=title, status=status, desc=desc, pubdate=pubdate,
+            aid=aid, cid=cid, bvid=bvid, p=p, pages=pages,
+            img_url=img_url, ep_id=ep_id,
+        )
+    except Exception as except_info:
+        raise APIUnsupportedError("解析html出错",except_info)
     return video_info
 
 
@@ -512,8 +531,12 @@ async def _get_video_basic_info_from_api(client: httpx.AsyncClient, url) -> Vide
     raw_json = json.loads(r.text)
     if raw_json['code'] != 0:
         raise APIResourceError(raw_json['message'], raw_json['message'])
+    # print(f'[green]video_info_api is[green]:{raw_json}')
+    with open(f"{bvid}.json", 'w', encoding='utf-8') as bili_html:
+        json.dump(raw_json, bili_html, ensure_ascii=False, indent=4)
     title = legal_title(raw_json['data']['title'])
     h1_title = title  # TODO: 根据视频类型，使 h1_title 与实际网页标题的格式一致
+    pubdate = datetime.strftime(datetime.fromtimestamp(raw_json['data']['pubdate']), '%Y%m%d%H%M%S')
     aid = raw_json['data']['aid']
     bvid = raw_json['data']['bvid']
     base_url = f"https://www.bilibili.com/video/{bvid}/"
@@ -531,7 +554,7 @@ async def _get_video_basic_info_from_api(client: httpx.AsyncClient, url) -> Vide
         pages.append(Page(p_name=p_name, p_url=p_url))
     assert p is not None, f"没有找到分P: p{selected_page_num}，请检查输入"  # cid 也会是 None
     img_url = raw_json['data']['pic']
-    basic_video_info = VideoInfo(title=title, h1_title=h1_title, aid=aid, cid=cid, status=status,
+    basic_video_info = VideoInfo(title=title, h1_title=h1_title, aid=aid, cid=cid, status=status, pubdate=pubdate,
                                  p=p, pages=pages, img_url=img_url, bvid=bvid, dash=None, other=None)
     return basic_video_info
 
